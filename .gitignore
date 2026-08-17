@@ -7,3 +7,6 @@ __pycache__/
 venv/
 .cache/
 .DS_Store
+
+# Rebuilt daily from Nasdaq; universe.json is worth committing, this is not.
+data/earnings.json

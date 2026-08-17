@@ -11,7 +11,17 @@ import sys
 import numpy as np
 import pandas as pd
 
-from server.ratio import PAIRS, _cache, build_ratio_series, build_series, compute_stats
+from server.ratio import (
+    PAIRS,
+    _cache,
+    build_ratio_series,
+    build_series,
+    compute_stats,
+    custom_pair,
+    decimals_for,
+    normalize_symbol,
+    resolve_pair,
+)
 from server.schwab import SchwabAPIError
 from server.timeframes import (
     MARKET_TZ,
@@ -229,6 +239,94 @@ def test_dst_boundary() -> None:
             )
 
 
+def test_symbol_validation() -> None:
+    for raw, want in (
+        ("gld", "GLD"), (" spy ", "SPY"), ("$SPX", "$SPX"),
+        ("brk.b", "BRK.B"), ("/es", "/ES"), ("x", "X"),
+        # Surrounding whitespace is a paste artifact, not a typo -- strip it.
+        ("GLD\n", "GLD"), ("\tSPY ", "SPY"),
+    ):
+        check(f"normalize_symbol({raw!r}) -> {want}", normalize_symbol(raw) == want,
+              f"got {normalize_symbol(raw)!r}")
+
+    for bad, why in (
+        ("", "empty"), ("   ", "blank"), ("GL D", "space"), ("GLD;DROP", "punctuation"),
+        ("A" * 25, "too long"), ("<script>", "markup"), ("GL\nD", "interior newline"),
+        ("GLD SPY", "two symbols in one field"),
+    ):
+        try:
+            normalize_symbol(bad)
+            check(f"rejects {why}", False, f"{bad!r} was accepted")
+        except ValueError:
+            check(f"rejects {why}", True)
+
+
+def test_custom_pair() -> None:
+    pair = custom_pair(" qqq ", "spy")
+    check("custom pair upper-cases both legs", pair.label == "QQQ/SPY", pair.label)
+    check("custom key is namespaced", pair.key == "custom:QQQ/SPY", pair.key)
+    check("unit hint reads correctly", pair.unit_hint == "SPY units per QQQ unit")
+    check("decimals are derived, not fixed", pair.decimals is None)
+
+    for same in ("GLD", "gld"):
+        try:
+            custom_pair("GLD", same)
+            check(f"rejects identical legs ({same})", False, "accepted")
+        except ValueError:
+            check(f"rejects identical legs ({same})", True)
+
+    # A hand-typed index symbol should inherit the same fallback the presets get.
+    spx = custom_pair("$SPX", "GLD")
+    check("hand-typed $SPX carries its fallback", spx.numerator.fallback_symbol == "SPY")
+    check("plain tickers get no fallback", spx.denominator.fallback_symbol is None)
+
+
+def test_resolve_pair() -> None:
+    check("preset key resolves", resolve_pair("GLD_USO", None, None) is PAIRS["GLD_USO"])
+    check("num+den wins over pair", resolve_pair("GLD_USO", "TLT", "GLD").label == "TLT/GLD")
+
+    for num, den in (("TLT", None), (None, "GLD"), ("TLT", "")):
+        try:
+            resolve_pair("GLD_USO", num, den)
+            check(f"half a custom pair ({num},{den}) is rejected", False, "accepted")
+        except ValueError:
+            check(f"half a custom pair ({num},{den}) is rejected", True)
+
+    try:
+        resolve_pair("NOPE", None, None)
+        check("unknown preset raises KeyError", False, "accepted")
+    except KeyError:
+        check("unknown preset raises KeyError", True)
+
+
+def test_decimals_for() -> None:
+    for value, want in ((6300.0, 2), (88.9, 3), (4.4, 4), (0.5, 5), (0.004, 6)):
+        check(f"decimals_for({value}) == {want}", decimals_for(value) == want,
+              f"got {decimals_for(value)}")
+    check("negatives use magnitude", decimals_for(-88.9) == 3)
+
+
+def test_custom_pair_series() -> None:
+    """A custom pair produces a normal payload with derived precision."""
+    _cache.clear()
+    stub = _StubClient(blank=set())
+    payload = asyncio.run(build_series(stub, custom_pair("SPY", "$SPX"), "1H"))
+    check("custom series is flagged", payload["pair"]["custom"] is True)
+    check("label uses the typed symbols", payload["pair"]["label"] == "SPY/$SPX",
+          payload["pair"]["label"])
+    # SPY/$SPX is about 0.1, so precision should go finer than the preset default.
+    check("precision derived from magnitude", payload["pair"]["decimals"] == 5,
+          f"decimals={payload['pair']['decimals']} on a ratio near "
+          f"{payload['stats']['mean']:.4f}")
+    check("stats computed as usual", payload["stats"]["mean"] is not None)
+
+    _cache.clear()
+    preset = asyncio.run(build_series(_StubClient(blank=set()), PAIRS["GLD_SLV"], "1H"))
+    check("preset keeps its fixed precision", preset["pair"]["decimals"] == 4)
+    check("preset is not flagged custom", preset["pair"]["custom"] is False)
+    _cache.clear()
+
+
 def test_view_windows() -> None:
     """The default x-axis window must fit inside the history that gets loaded."""
     expected = {"5m": 5, "15m": 5, "1H": 15, "4H": 30, "1D": 365}
@@ -426,6 +524,11 @@ if __name__ == "__main__":
     test_no_overlap_errors()
     test_view_windows()
     test_view_days_clamped_to_lookback()
+    test_symbol_validation()
+    test_custom_pair()
+    test_resolve_pair()
+    test_decimals_for()
+    test_custom_pair_series()
     test_demo_daily_stamp_convention()
     test_auth_error_after_refresh_retry()
 

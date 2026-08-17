@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ class Pair:
     denominator: Leg
     description: str
     unit_hint: str = ""
-    decimals: int = 4
+    decimals: int | None = None  # None => derive from the ratio's magnitude
 
     @property
     def label(self) -> str:
@@ -81,6 +82,86 @@ PAIRS: dict[str, Pair] = {
 
 DEFAULT_PAIR = "GLD_USO"
 
+# ------------------------------------------------------------ custom pairs
+
+# Schwab symbols are upper case and may carry a `$` index prefix, a `/` futures
+# prefix, or dots (BRK.B). Anything outside this set is a typo, not a symbol.
+SYMBOL_RE = re.compile(r"^[A-Z0-9$/][A-Z0-9./$_-]{0,23}$")
+MAX_SYMBOL_LEN = 24
+
+# Symbols that are commonly unavailable and have a workable stand-in, applied to
+# hand-typed legs the same way the built-in pairs get it.
+KNOWN_FALLBACKS: dict[str, tuple[str, str]] = {
+    "$SPX": ("SPY", "$SPX history unavailable on this account; using SPY (≈1/10 of SPX)."),
+    "$NDX": ("QQQ", "$NDX history unavailable on this account; using QQQ."),
+    "$DJI": ("DIA", "$DJI history unavailable on this account; using DIA."),
+}
+
+
+def normalize_symbol(raw: str) -> str:
+    """Upper-case and validate a hand-entered ticker."""
+    symbol = (raw or "").strip().upper()
+    if not symbol:
+        raise ValueError("Enter a symbol for both legs.")
+    if len(symbol) > MAX_SYMBOL_LEN:
+        raise ValueError(f"'{symbol[:MAX_SYMBOL_LEN]}…' is too long to be a symbol.")
+    if not SYMBOL_RE.match(symbol):
+        raise ValueError(
+            f"'{symbol}' is not a valid symbol — use letters, digits and . / $ _ - only."
+        )
+    return symbol
+
+
+def _custom_leg(symbol: str) -> Leg:
+    fallback = KNOWN_FALLBACKS.get(symbol)
+    return Leg(
+        symbol,
+        symbol,
+        fallback_symbol=fallback[0] if fallback else None,
+        fallback_note=fallback[1] if fallback else "",
+    )
+
+
+def custom_pair(num: str, den: str) -> Pair:
+    """Build an ad-hoc pair from two hand-entered symbols."""
+    numerator = normalize_symbol(num)
+    denominator = normalize_symbol(den)
+    if numerator == denominator:
+        raise ValueError(
+            f"Both legs are {numerator}; the ratio would be a flat 1.0. Use two symbols."
+        )
+    return Pair(
+        key=f"custom:{numerator}/{denominator}",
+        numerator=_custom_leg(numerator),
+        denominator=_custom_leg(denominator),
+        description=f"Custom ratio — {numerator} priced in {denominator}.",
+        unit_hint=f"{denominator} units per {numerator} unit",
+        decimals=None,
+    )
+
+
+def resolve_pair(pair_key: str, num: str | None, den: str | None) -> Pair:
+    """A built-in pair, or a custom one when either symbol field is supplied."""
+    if num or den:
+        return custom_pair(num or "", den or "")
+    if pair_key not in PAIRS:
+        raise KeyError(pair_key)
+    return PAIRS[pair_key]
+
+
+def decimals_for(value: float) -> int:
+    """Enough precision to see the ratio move, without noise digits."""
+    magnitude = abs(value)
+    if magnitude >= 100:
+        return 2
+    if magnitude >= 10:
+        return 3
+    if magnitude >= 1:
+        return 4
+    if magnitude >= 0.01:
+        return 5
+    return 6
+
 STAT_WINDOWS: dict[str, int | None] = {
     "full": None,
     "500": 500,
@@ -104,10 +185,32 @@ _cache: dict[tuple[str, str, int, int], _CacheEntry] = {}
 _cache_lock = asyncio.Lock()
 
 
-def _window_ms(days: int) -> tuple[int, int]:
+def window_ms(days: int) -> tuple[int, int]:
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+async def fetch_symbol_closes(
+    client: SchwabClient,
+    symbol: str,
+    tf: Timeframe,
+    days: int,
+    *,
+    extended: bool = False,
+) -> pd.Series:
+    """One symbol's base-resolution closes. No caching, no fallback."""
+    start_ms, end_ms = window_ms(days)
+    candles = await client.price_history(
+        symbol,
+        period_type=tf.period_type,
+        frequency_type=tf.frequency_type,
+        frequency=tf.frequency,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        extended_hours=extended,
+    )
+    return candles_to_closes(candles)
 
 
 async def _fetch_leg(
@@ -123,21 +226,11 @@ async def _fetch_leg(
             # The note rides along so a fallback banner does not flicker off on refresh.
             return hit.closes, hit.symbol_used, hit.note
 
-    start_ms, end_ms = _window_ms(days)
     note = ""
     symbol_used = leg.symbol
 
     async def pull(symbol: str) -> pd.Series:
-        candles = await client.price_history(
-            symbol,
-            period_type=tf.period_type,
-            frequency_type=tf.frequency_type,
-            frequency=tf.frequency,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            extended_hours=extended,
-        )
-        return candles_to_closes(candles)
+        return await fetch_symbol_closes(client, symbol, tf, days, extended=extended)
 
     try:
         closes = await pull(leg.symbol)
@@ -254,6 +347,9 @@ async def build_series(
 
     window = STAT_WINDOWS.get(stat_window, None)
     stats = compute_stats(ratio, window)
+    decimals = pair.decimals if pair.decimals is not None else decimals_for(
+        float(ratio.median())
+    )
 
     points = [
         {"time": int(ts.timestamp()), "value": round(float(v), 6)}
@@ -266,7 +362,8 @@ async def build_series(
             "label": f"{num_sym}/{den_sym}",
             "description": pair.description,
             "unit_hint": pair.unit_hint,
-            "decimals": pair.decimals,
+            "decimals": decimals,
+            "custom": pair.key.startswith("custom:"),
             "numerator": num_sym,
             "denominator": den_sym,
         },

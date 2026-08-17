@@ -7,9 +7,14 @@ const REFRESH_MS = 60_000;
 const RIGHT_OFFSET = 4; // blank slots kept to the right of the last point
 const MIN_BAR_SPACING = 0.05; // low enough that "show everything" always fits
 
+const RECENTS_KEY = 'rvc-custom-pairs';
+const MAX_RECENTS = 6;
+
 const state = {
   config: null,
   pair: null,
+  custom: null,          // {num, den} when a hand-entered pair is active
+  loadedKey: null,       // which pair the drawn series belongs to
   timeframe: null,
   statWindow: 'full',
   lookback: null,
@@ -403,17 +408,33 @@ function showNotice(messages) {
   box.innerHTML = messages.join('<br>');
 }
 
+/* Identifies the pair being requested, so a failed load can tell "this symbol is
+   bad" from "the refresh of what is already drawn hiccuped". */
+function pairKey() {
+  return state.custom ? `custom:${state.custom.num}/${state.custom.den}` : state.pair;
+}
+
+function pairParams() {
+  const params = new URLSearchParams();
+  if (state.custom) {
+    params.set('num', state.custom.num);
+    params.set('den', state.custom.den);
+  } else {
+    params.set('pair', state.pair);
+  }
+  return params;
+}
+
 async function loadSeries({ preserveView = false } = {}) {
   const token = ++state.loadToken;
+  const requestKey = pairKey();
   el('loading').hidden = false;
   el('live-stamp').textContent = '';
 
-  const params = new URLSearchParams({
-    pair: state.pair,
-    timeframe: state.timeframe,
-    stat_window: state.statWindow,
-    extended: String(state.extended),
-  });
+  const params = pairParams();
+  params.set('timeframe', state.timeframe);
+  params.set('stat_window', state.statWindow);
+  params.set('extended', String(state.extended));
   if (state.lookback) params.set('lookback_days', String(state.lookback));
 
   let payload;
@@ -426,17 +447,27 @@ async function loadSeries({ preserveView = false } = {}) {
       throw err;
     }
   } catch (err) {
-    if (token !== state.loadToken) return;
+    if (token !== state.loadToken) return false;
     el('loading').hidden = true;
+    // Never leave another pair's series on screen under an error about this one.
+    if (state.loadedKey !== requestKey) {
+      state.points = [];
+      state.realTimes = [];
+      state.series = null;
+      ratioLine.setData([]);
+      drawLevels();
+      el('strip').innerHTML = '';
+    }
     showError(describeError(err.message, err.kind));
-    return;
+    return false;
   }
-  if (token !== state.loadToken) return;
+  if (token !== state.loadToken) return false;
 
   showError(null);
   showNotice([...(state.demoNotice ? [state.demoNotice] : []), ...payload.notes]);
 
   state.series = payload;
+  state.loadedKey = requestKey;
   state.decimals = payload.pair.decimals;
   state.points = payload.points.map((p) => ({
     time: toChartTime(p.time, state.timeframe),
@@ -463,6 +494,7 @@ async function loadSeries({ preserveView = false } = {}) {
   renderReadoutLatest();
   renderHeader();
   el('loading').hidden = true;
+  return true;
 }
 
 function describeError(message, kind) {
@@ -474,7 +506,10 @@ function describeError(message, kind) {
   if (kind === 'upstream') {
     return `<b>Schwab rejected the request.</b> ${message}`;
   }
-  return `<b>Could not load the series.</b> ${message}`;
+  const hint = state.custom
+    ? ' Check the spelling, and note that Schwab wants index symbols as <code>$SPX</code>.'
+    : '';
+  return `<b>Could not load the series.</b> ${message}${hint}`;
 }
 
 function renderHeader() {
@@ -501,11 +536,13 @@ function renderHeader() {
 async function pollQuote() {
   if (!state.live || !state.series || !state.points.length) return;
   // The chart shows the last successfully loaded series; if a reload failed after
-  // a pair/timeframe switch, state.pair no longer describes what is on screen.
-  if (state.series.pair.key !== state.pair || state.series.timeframe.key !== state.timeframe) return;
+  // a pair/timeframe switch, the current controls no longer describe what is on
+  // screen. Compare against the request identity -- for custom pairs the server's
+  // pair.key is 'custom:NUM/DEN', which never equals state.pair.
+  if (state.loadedKey !== pairKey() || state.series.timeframe.key !== state.timeframe) return;
   let data;
   try {
-    const resp = await fetch(`/api/quote?pair=${encodeURIComponent(state.pair)}`);
+    const resp = await fetch(`/api/quote?${pairParams()}`);
     data = await resp.json();
   } catch {
     return;
@@ -564,12 +601,29 @@ function segment(container, items, selected, onPick) {
   }
 }
 
+const CUSTOM_KEY = '__custom__';
+
 function renderSegments() {
+  const items = state.config.pairs.map((p) => ({
+    key: p.key, label: p.label, title: p.description,
+  }));
+  items.push({ key: CUSTOM_KEY, label: 'Custom', title: 'Plot the ratio of any two symbols' });
+
   segment(
     el('pair-seg'),
-    state.config.pairs.map((p) => ({ key: p.key, label: p.label, title: p.description })),
-    state.pair,
-    (key) => { state.pair = key; renderSegments(); loadSeries(); },
+    items,
+    state.custom ? CUSTOM_KEY : state.pair,
+    (key) => {
+      if (key === CUSTOM_KEY) {
+        el('custom-row').hidden = false;
+        el('custom-num').focus();
+        return;
+      }
+      state.custom = null;
+      state.pair = key;
+      renderSegments();
+      loadSeries();
+    },
   );
   segment(
     el('tf-seg'),
@@ -588,6 +642,58 @@ function renderSegments() {
 
 function tfConfig(key) {
   return state.config.timeframes.find((t) => t.key === key);
+}
+
+/* ---------------------------------------------------------- custom pairs */
+
+function readRecents() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]');
+    return Array.isArray(stored) ? stored.filter((r) => r && r.num && r.den) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberCustom(num, den) {
+  const rest = readRecents().filter((r) => !(r.num === num && r.den === den));
+  const next = [{ num, den }, ...rest].slice(0, MAX_RECENTS);
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+  renderRecents();
+}
+
+function renderRecents() {
+  const box = el('custom-recents');
+  const recents = readRecents();
+  box.innerHTML = '';
+  for (const { num, den } of recents) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.textContent = `${num}/${den}`;
+    chip.title = `Plot ${num} ÷ ${den}`;
+    chip.addEventListener('click', () => plotCustom(num, den));
+    box.appendChild(chip);
+  }
+}
+
+async function plotCustom(num, den) {
+  const n = (num || '').trim().toUpperCase();
+  const d = (den || '').trim().toUpperCase();
+  el('custom-num').value = n;
+  el('custom-den').value = d;
+
+  if (!n || !d) {
+    showError('<b>Enter a symbol for both legs.</b> For example GLD and SLV.');
+    return;
+  }
+
+  state.custom = { num: n, den: d };
+  state.lookback = null;
+  el('lookback').value = tfConfig(state.timeframe).default_lookback_days;
+  renderSegments();
+
+  // Only keep symbols that actually returned data.
+  if (await loadSeries()) rememberCustom(n, d);
 }
 
 function initTheme() {
@@ -617,6 +723,320 @@ function initTheme() {
   });
 }
 
+/* ------------------------------------------------------------- screener */
+
+const screener = {
+  job: null,
+  timeframe: '1D',
+  rows: [],
+  errors: [],
+  earnings: null,        // {symbol: {...}} once looked up
+  earningsState: 'idle', // idle | loading | ready | failed
+  meta: null,
+  timer: null,
+  universe: null,
+};
+
+function scrEl(id) { return el(id); }
+
+async function loadUniverseInfo() {
+  try {
+    const info = await (await fetch('/api/universe')).json();
+    if (info.total === undefined) throw new Error(info.detail || 'unavailable');
+    screener.universe = info;
+    const mins = Math.max(1, Math.round(info.estimated_seconds / 60));
+    const when = info.fetched_at ? new Date(info.fetched_at).toLocaleDateString() : 'unknown';
+    scrEl('scr-sub').innerHTML =
+      `${info.total} members (S&amp;P 500 ${info.counts.sp500}, Nasdaq-100 ${info.counts.nasdaq100}), ` +
+      `list updated ${when}. A full scan is ~${info.total} requests — about ` +
+      `${mins} min at ${info.requests_per_minute}/min.`;
+  } catch (err) {
+    scrEl('scr-sub').innerHTML =
+      'Constituent list missing — run <code>python -m server.refresh_universe</code>.';
+  }
+}
+
+function screenerIndices() {
+  const wanted = [];
+  if (scrEl('scr-sp500').checked) wanted.push('sp500');
+  if (scrEl('scr-ndx').checked) wanted.push('nasdaq100');
+  return wanted;
+}
+
+function setScanning(active) {
+  scrEl('scr-run').hidden = active;
+  scrEl('scr-cancel').hidden = !active;
+  scrEl('scr-progress').hidden = !active;
+}
+
+function showScreenError(message) {
+  const box = scrEl('scr-error');
+  box.hidden = !message;
+  if (message) box.innerHTML = message;
+}
+
+async function runScan() {
+  const indices = screenerIndices();
+  if (!indices.length) {
+    showScreenError('<b>Pick at least one index.</b>');
+    return;
+  }
+  showScreenError(null);
+  screener.rows = [];
+  screener.earnings = null;
+  screener.earningsState = 'idle';
+  scrEl('scr-results').innerHTML = '';
+
+  const params = new URLSearchParams({
+    timeframe: screener.timeframe,
+    stat_window: scrEl('scr-stat').value,
+    prefer_qqq: String(scrEl('scr-prefer').checked),
+    indices: indices.join(','),
+  });
+
+  let job;
+  try {
+    const resp = await fetch(`/api/screen?${params}`, { method: 'POST' });
+    job = await resp.json();
+    if (!resp.ok) throw new Error(job.detail || job.error || `HTTP ${resp.status}`);
+  } catch (err) {
+    showScreenError(`<b>Could not start the scan.</b> ${err.message}`);
+    return;
+  }
+
+  screener.job = job.id;
+  setScanning(true);
+  pollScan();
+}
+
+async function pollScan() {
+  clearTimeout(screener.timer);
+  if (!screener.job) return;
+
+  let status;
+  try {
+    const resp = await fetch(`/api/screen/${screener.job}`);
+    status = await resp.json();
+    if (!resp.ok) {
+      // The job is gone -- almost always a server restart mid-scan. Say so instead
+      // of freezing the progress bar with no explanation.
+      setScanning(false);
+      screener.job = null;
+      showScreenError(`<b>Scan lost.</b> ${status.detail || 'The server restarted; start the scan again.'}`);
+      return;
+    }
+  } catch {
+    screener.timer = setTimeout(pollScan, 3000);
+    return;
+  }
+
+  screener.rows = status.rows || [];
+  screener.meta = status.meta;
+  screener.errors = status.errors || [];
+  renderScanProgress(status);
+  renderHits();
+
+  if (status.state === 'running' || status.state === 'pending') {
+    screener.timer = setTimeout(pollScan, 2000);
+    return;
+  }
+
+  setScanning(false);
+  screener.job = null;
+  renderHits();  // triggers the earnings lookup for whatever is on screen
+  if (status.state === 'failed') {
+    showScreenError(`<b>Scan failed.</b> ${status.message || 'Unknown error.'}`);
+  } else if (status.state === 'cancelled') {
+    showScreenError('<b>Scan cancelled.</b> Partial results are shown below.');
+  }
+}
+
+function renderScanProgress(status) {
+  const { done, total, pct } = status.progress;
+  scrEl('scr-bar').style.width = `${pct}%`;
+
+  const parts = [`${status.phase} — ${done}/${total} (${pct}%)`];
+  if (status.error_count) parts.push(`${status.error_count} skipped`);
+
+  // A running scan with no hits yet is the normal case, not a stall -- say so,
+  // and show an ETA so a slow scan does not read as a broken one.
+  if (status.state === 'running' && done && done < total && status.started_at) {
+    const elapsed = (Date.now() - Date.parse(status.started_at)) / 1000;
+    const remaining = Math.round((elapsed / done) * (total - done));
+    if (remaining > 2) parts.push(`~${remaining}s left`);
+  }
+  scrEl('scr-status').textContent = parts.join(' · ');
+}
+
+/* Names and sectors come from a third-party CSV via universe.json -- escape them
+   before they go anywhere near innerHTML. */
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+/* Earnings dates for whatever the scan surfaced. Fetched after the scan rather than
+   during it: only the hits need annotating, and the first call may have to build the
+   calendar (~20s), which should never hold up the scan itself. */
+async function loadEarningsFor(symbols) {
+  // Only the rows on screen need annotating -- asking for all ~513 scored names
+  // would blow the endpoint's cap and is wasted work.
+  const missing = symbols.filter((s) => !(screener.earnings || {})[s]);
+  if (!missing.length || screener.earningsState === 'loading') return;
+
+  screener.earningsState = 'loading';
+  renderHits();
+  try {
+    const params = new URLSearchParams({ symbols: missing.slice(0, 400).join(',') });
+    const resp = await fetch(`/api/earnings?${params}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    screener.earnings = { ...(screener.earnings || {}), ...data.symbols };
+    screener.earningsCalendar = data.calendar;
+    screener.earningsState = 'ready';
+  } catch {
+    screener.earningsState = 'failed';
+  }
+  renderHits();
+}
+
+function earningsCell(symbol) {
+  if (screener.earningsState === 'loading') return '<span class="muted">…</span>';
+  if (screener.earningsState === 'failed') return '<span class="muted">n/a</span>';
+
+  const info = screener.earnings?.[symbol];
+  if (!info) return '<span class="muted">—</span>';
+  if (!info.scheduled) {
+    return '<span class="muted" title="Nasdaq publishes confirmed dates about 8 weeks out; ' +
+           'a company that just reported has no next date yet">not scheduled</span>';
+  }
+
+  const when = new Date(`${info.date}T00:00:00Z`).toLocaleDateString('en-US',
+    { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const soon = info.days_away <= 7 ? ' soon' : '';
+  const tip = [
+    info.fiscal_quarter ? `Q ending ${info.fiscal_quarter}` : '',
+    info.eps_forecast ? `consensus EPS ${info.eps_forecast}` : '',
+  ].filter(Boolean).join(' · ');
+
+  return `<span class="earn${soon}" title="${tip}">${when}` +
+    `<small>${info.days_away}d${info.when ? ` · ${info.when}` : ''}</small></span>`;
+}
+
+function renderHits() {
+  const box = scrEl('scr-results');
+  const rows = screener.rows;
+  if (!rows.length) { box.innerHTML = ''; return; }
+
+  const threshold = Math.abs(parseFloat(scrEl('scr-threshold').value) || 0);
+  const hits = rows.filter((r) => Math.abs(r.z) >= threshold);
+  const rich = hits.filter((r) => r.z > 0).length;
+  const meta = screener.meta || {};
+
+  const skipped = screener.errors || [];
+  const skippedNote = skipped.length
+    ? ` <span class="skipped">${skipped.length} skipped — ` +
+      `${skipped.slice(0, 8).map((e) => esc(e.symbol)).join(', ')}` +
+      `${skipped.length > 8 ? '…' : ''} (not recognised by Schwab).</span>`
+    : '';
+
+  const summary =
+    `<p class="summary"><b>${hits.length}</b> of ${rows.length} scored beyond ` +
+    `<b>±${threshold}σ</b> — ${rich} rich, ${hits.length - rich} cheap. ` +
+    `${meta.timeframe_label || ''} bars, ${meta.lookback_days || '?'}-day lookback, ` +
+    `mean/σ over ${meta.stat_window === 'full' ? 'the full range' : `the last ${meta.stat_window}`}. ` +
+    `Click a row to chart it.${skippedNote}</p>`;
+
+  if (!hits.length) {
+    const scanning = Boolean(screener.job);
+    box.innerHTML = summary + `<p class="empty">` + (scanning
+      ? `No name past ±${threshold}σ yet — still scanning.`
+      : `Nothing past ±${threshold}σ. Lower the threshold to see the widest names.`) +
+      `</p>`;
+    return;
+  }
+
+  // Benchmark is carried by colour AND by the "vs" column, never colour alone.
+  const bySpy = hits.filter((r) => r.benchmark === 'SPY');
+  const byQqq = hits.filter((r) => r.benchmark === 'QQQ');
+  const key =
+    `<p class="bench-key">` +
+    `<span><i style="background:var(--series-1)"></i>compared with <b>SPY</b> — ${bySpy.length}</span>` +
+    `<span><i style="background:var(--series-2)"></i>compared with <b>QQQ</b> — ${byQqq.length}</span>` +
+    `</p>`;
+
+  const body = hits.map((r) => {
+    const arrow = r.z > 0 ? '▲' : '▼';
+    return `<tr class="bench-${r.benchmark}" data-num="${esc(r.symbol)}" data-den="${esc(r.benchmark)}">` +
+      `<td><span class="ticker">${esc(r.symbol)}</span></td>` +
+      `<td class="name" title="${esc(r.name)}">${esc(r.name)}</td>` +
+      `<td class="sector">${esc(r.sector) || '—'}</td>` +
+      `<td>${esc(r.benchmark)}</td>` +
+      `<td class="num">${r.z > 0 ? '+' : ''}${r.z.toFixed(2)}</td>` +
+      `<td class="num">${r.pct_from_mean >= 0 ? '+' : ''}${r.pct_from_mean.toFixed(1)}%</td>` +
+      `<td>${arrow} ${r.direction}</td>` +
+      `<td class="earn-cell">${earningsCell(r.symbol)}</td>` +
+      `<td class="num">${r.n}</td></tr>`;
+  }).join('');
+
+  // A plain, copyable ticker list -- the thing you actually take away from a scan.
+  const listFor = (label, group) => group.length
+    ? `<div class="bench-${label}"><b>vs ${label}:</b> ` +
+      group.map((r) => `<code>${esc(r.symbol)}</code>`).join(' ') + `</div>`
+    : '';
+
+  box.innerHTML = summary + key +
+    `<div class="hits"><table class="hit-table">` +
+    `<thead><tr><th>Ticker</th><th>Company</th><th>Sector</th><th>vs</th>` +
+    `<th>z</th><th>vs mean</th><th>Read</th><th>Next earnings</th><th>Bars</th></tr></thead>` +
+    `<tbody>${body}</tbody></table></div>` +
+    `<div class="ticker-list">${listFor('SPY', bySpy)}${listFor('QQQ', byQqq)}</div>`;
+
+  // Lazily annotate whatever is displayed; a lower threshold reveals more rows.
+  if (!screener.job) loadEarningsFor(hits.map((r) => r.symbol));
+
+  for (const tr of box.querySelectorAll('tbody tr')) {
+    tr.addEventListener('click', () => {
+      // Chart it on the settings it was scored with, so the z on screen is the z
+      // in the row -- a different timeframe would show a different number.
+      if (meta.timeframe && meta.timeframe !== state.timeframe) {
+        state.timeframe = meta.timeframe;
+        state.lookback = null;
+        el('lookback').value = tfConfig(state.timeframe).default_lookback_days;
+        el('lookback').max = tfConfig(state.timeframe).max_lookback_days;
+        renderSegments();
+      }
+      if (meta.stat_window && meta.stat_window !== state.statWindow) {
+        state.statWindow = meta.stat_window;
+        el('stat-window').value = meta.stat_window;
+      }
+      plotCustom(tr.dataset.num, tr.dataset.den);
+      document.querySelector('.chart-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }
+}
+
+function renderScreenerSegments() {
+  segment(
+    scrEl('scr-tf-seg'),
+    state.config.timeframes.map((t) => ({ key: t.key, label: t.key, title: t.label })),
+    screener.timeframe,
+    (key) => { screener.timeframe = key; renderScreenerSegments(); },
+  );
+}
+
+function initScreener() {
+  renderScreenerSegments();
+  scrEl('scr-run').addEventListener('click', runScan);
+  scrEl('scr-cancel').addEventListener('click', async () => {
+    if (!screener.job) return;
+    await fetch(`/api/screen/${screener.job}`, { method: 'DELETE' });
+  });
+  scrEl('scr-threshold').addEventListener('input', renderHits);
+  loadUniverseInfo();
+}
+
 async function main() {
   // Theme first: buildChart reads the CSS custom properties, so the stored
   // data-theme has to be on the document before the chart exists.
@@ -639,6 +1059,7 @@ async function main() {
   el('lookback').max = tf.max_lookback_days;
 
   renderSegments();
+  initScreener();
 
   if (config.demo) {
     state.demoNotice = 'Demo mode (<code>RVC_DEMO=1</code>) — bars are synthetic, not market data. ' +
@@ -650,6 +1071,20 @@ async function main() {
       ? 'No valid Schwab refresh token — they expire 7 days after each login.'
       : 'SCHWAB_APP_KEY / SCHWAB_APP_SECRET are not set.';
     showError(describeError(why, 'auth'));
+  }
+
+  renderRecents();
+  const submitCustom = (e) => {
+    e.preventDefault();
+    plotCustom(el('custom-num').value, el('custom-den').value);
+  };
+  el('custom-row').addEventListener('submit', submitCustom);
+  // Explicit Enter handling: implicit form submission does not fire reliably here,
+  // and preventDefault keeps it from double-firing where it does.
+  for (const id of ['custom-num', 'custom-den']) {
+    el(id).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitCustom(e);
+    });
   }
 
   el('refresh').addEventListener('click', () => loadSeries());

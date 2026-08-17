@@ -15,6 +15,15 @@ a different — and appropriate — set of levels.
 | `$SPX/USO` | S&P 500 index points per USO unit (equities vs. crude) |
 | `GLD/SLV` | the gold/silver ratio, via the ETFs |
 
+Plus **Custom** — type any two Schwab symbols to plot their ratio. Everything else
+(timeframes, mean/σ levels, live quotes, the table view) works identically. Symbols
+are upper-cased for you; index symbols take Schwab's `$` prefix (`$SPX`), and `$SPX`,
+`$NDX` and `$DJI` fall back to `SPY`/`QQQ`/`DIA` if your account isn't entitled to
+index history. The last six pairs you plot are remembered as one-click chips.
+
+Precision adapts to the ratio's size — `QQQ/SPY` near 0.14 shows 5 decimals, `$SPX/USO`
+near 80 shows 3.
+
 **Timeframes.** Selecting one frames the x axis on its own window, while more history
 stays loaded behind it — **double-click the chart to fit both axes to everything
 loaded**, or scroll/drag to move around. Switching timeframe or pair re-frames; once
@@ -94,6 +103,107 @@ in the app makes clear the data is not real.
 
 ---
 
+## Screener
+
+Scores every S&P 500 and Nasdaq-100 member against its own benchmark and surfaces the
+names sitting past ±3σ. **Nasdaq-100 members are measured against QQQ, everything else
+against SPY**; the ~87 names in both indices default to QQQ (the tighter peer group)
+and can be flipped to SPY with one checkbox.
+
+**The screener reproduces the chart, it does not approximate it.** Both paths run the
+same fetch, the same intersection, the same aggregation and the same sample σ over the
+same window, so a row reading `MU  -3.4` means opening MU/QQQ on the daily chart shows
+a ratio sitting below its −3σ line. A regression test pins the two to identical z and
+mean, and clicking any row charts that pair on the settings it was scored with.
+
+Output is the plain ticker — `MU`, not `MU/QQQ` — **colour-coded by benchmark**:
+blue for names measured against SPY, orange for QQQ. The colour never carries the
+meaning alone: every row also names its benchmark in the `vs` column, the legend gives
+counts for each, and the results end with a copyable ticker list split by benchmark.
+
+The threshold is applied in the browser over every scored row, so you can slide it from
+3σ to 2σ and back without rescanning.
+
+### Constituent lists
+
+Schwab has no index-membership endpoint, so the lists come from
+[yfiua/index-constituents](https://github.com/yfiua/index-constituents) (refreshed
+monthly) with GICS sectors from
+[datasets/s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies).
+They are cached to `data/universe.json` and that cache is what a scan reads — the
+network is only touched when you ask:
+
+```bash
+python -m server.refresh_universe
+```
+
+Dataset tickers are mapped to Schwab's symbology (`BRK.B` → `BRK/B`). Expect a handful
+of names per scan to be rejected as unknown — the lists drift from Schwab's symbol set
+between refreshes. Those are listed by name under the results rather than silently
+dropped.
+
+### Timing and rate limits
+
+A full scan is one request per member plus two benchmarks — about **520 requests**,
+run in parallel across 8 workers and paced at 1200/min, so a full scan takes roughly
+**25–30 seconds**. Progress shows a live ETA.
+
+Those numbers come from measurement, not the published limit. Against a live account:
+
+| Concurrency | Result |
+|---|---|
+| 8 (default) | clean |
+| 16 | 517 symbols in **6.3s**, zero errors |
+| 24 | **tripped Schwab's edge protection** — HTTP 429, then a sustained 403 `Access Denied` that took minutes to clear |
+
+So the ceiling is real and it is not the documented 120/min. The defaults sit at half
+the proven-clean concurrency and a quarter of its request rate. Tune with
+`SCREEN_REQUESTS_PER_MINUTE` and `SCREEN_CONCURRENCY` knowing where the cliff is.
+
+**The scan backs off by itself.** A 429 or 403 halves the request rate, waits with
+exponential backoff and jitter, and retries up to four times per symbol before giving
+up; clean responses ease the rate back to the configured value. Throttling therefore
+costs time rather than coverage, and the progress line says when it is happening. A
+404 or other permanent error is recorded against that symbol immediately rather than
+retried.
+
+Scans run as a background job with live progress, and can be cancelled — partial
+results stay on screen.
+
+### Next earnings date
+
+Every result row carries its next scheduled earnings announcement — date, days away,
+and `BMO`/`AMC` when the source states it; hovering shows the fiscal quarter and
+consensus EPS estimate. Anything inside a week is highlighted, since an announcement
+before you would expect mean reversion is the thing most likely to invalidate the
+trade.
+
+Schwab's fundamental projection has dividend dates but **no earnings date**, so this
+comes from Nasdaq's public earnings calendar. That calendar is queried one day at a
+time, so the whole forward window is pulled once (~20s) and cached to
+`data/earnings.json` for 12 hours; lookups are then instant. It rebuilds itself when
+stale, or pre-warm it with:
+
+```bash
+python -m server.refresh_earnings
+```
+
+**Coverage is partial by nature.** Nasdaq publishes confirmed dates about eight weeks
+out — measured, the furthest available date was 55 days ahead — so a company that has
+just reported has no next date yet and shows **not scheduled**. In a live scan, 6 of
+12 results had a date. Estimating the rest from a quarterly cadence would look more
+complete and be wrong, so the blank is left honest.
+
+### A caveat on reading the output
+
+A z-score of a *trending* ratio is bounded (a perfectly linear ramp tops out near
+1.7σ), so a 3σ reading is not "this has trended a long way" — it is "this moved sharply
+relative to how it usually moves." That makes the screener good at finding recent
+dislocations and poor at finding slow multi-year divergences. Shorten the stats window
+to make it more sensitive to recent action.
+
+---
+
 ## How the numbers are computed
 
 **Base bars.** Schwab serves minute bars only at 1/5/10/15/30 and daily bars. 5m and
@@ -164,13 +274,22 @@ server/
   login.py       one-time authorization flow (python -m server.login)
   ratio.py       pair definitions, ratio construction, mean/σ stats
   timeframes.py  timeframe table, session-anchored resampling
+  screen.py      screener job engine, rate limiting, z-scoring
+  universe.py    SPY/QQQ membership, benchmark assignment, symbol mapping
+  earnings.py    Nasdaq earnings calendar: fetch, cache, per-symbol lookup
+  refresh_universe.py   refresh the cached constituent lists
+  refresh_earnings.py   pre-warm the earnings calendar cache
   demo.py        synthetic data source for RVC_DEMO=1
   config.py      .env-backed settings
+data/
+  universe.json  cached constituent lists (regenerate with refresh_universe)
+  earnings.json  cached earnings calendar, rebuilt daily (gitignored)
 web/
   index.html, app.js, style.css
   vendor/        TradingView Lightweight Charts (vendored, Apache-2.0)
 tests/
-  test_ratio.py  offline checks -- no credentials needed
+  test_ratio.py   offline checks -- no credentials needed
+  test_screen.py  screener: universe, benchmark rules, z-scoring, pacing
 ```
 
 ### API
@@ -178,21 +297,28 @@ tests/
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/config` | pairs, timeframes, defaults, auth status |
-| `GET /api/series` | ratio points + stats — `pair`, `timeframe`, `lookback_days`, `stat_window`, `extended` |
-| `GET /api/quote` | current ratio from live quotes — `pair` |
+| `GET /api/series` | ratio points + stats — `pair` **or** `num`+`den`, `timeframe`, `lookback_days`, `stat_window`, `extended` |
+| `GET /api/quote` | current ratio from live quotes — `pair` **or** `num`+`den` |
 | `GET /api/auth/status` | token state, and the authorization URL when re-login is needed |
+| `GET /api/universe` | constituent counts, list age, and the estimated scan time |
+| `GET /api/earnings` | next earnings per symbol — `symbols=A,B,C`, optional `refresh=true` |
+| `POST /api/screen` | start a scan — `timeframe`, `stat_window`, `indices`, `prefer_qqq`, `lookback_days`, `limit` |
+| `GET /api/screen/{id}` | progress + scored rows (`?rows=false` for progress only) |
+| `DELETE /api/screen/{id}` | cancel a running scan |
 
 ### Tests
 
 ```bash
-python -m tests.test_ratio
+python -m tests.test_ratio && python -m tests.test_screen
 ```
 
 Covers session-anchored bucketing (including across DST and the overnight gap), ratio
-construction, leg misalignment, the `$SPX`→SPY fallback, and the mean/σ maths. No
-network or credentials required.
+construction, leg misalignment, the `$SPX`→SPY fallback, custom-symbol validation, and
+the mean/σ maths. No network or credentials required.
 
-### Adding a pair
+### Adding a preset pair
 
-Add a `Pair` to `PAIRS` in [server/ratio.py](server/ratio.py). Legs take an optional
-`fallback_symbol` for symbols whose history may not be entitled.
+Add a `Pair` to `PAIRS` in [server/ratio.py](server/ratio.py) — this is only for pairs
+you want as a permanent button; anything else can go through **Custom**. Legs take an
+optional `fallback_symbol` for symbols whose history may not be entitled, and
+`decimals=None` derives the display precision from the ratio's magnitude.

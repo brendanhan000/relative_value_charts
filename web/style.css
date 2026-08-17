@@ -13,8 +13,9 @@
   --border: rgba(11, 11, 11, 0.1);
   --ghost: rgba(11, 11, 11, 0.045);
 
-  /* The ratio line: categorical slot 1. */
+  /* Categorical slots: 1 = ratio line & SPY benchmark, 2 = QQQ benchmark. */
   --series-1: #2a78d6;
+  --series-2: #eb6834;
 
   /* Status palette -- fixed, never themed. Used only for the stretch chip. */
   --good: #0ca30c;
@@ -36,6 +37,7 @@
     --border: rgba(255, 255, 255, 0.1);
     --ghost: rgba(255, 255, 255, 0.06);
     --series-1: #3987e5;
+    --series-2: #d95926;
   }
 }
 
@@ -51,6 +53,7 @@
   --border: rgba(255, 255, 255, 0.1);
   --ghost: rgba(255, 255, 255, 0.06);
   --series-1: #3987e5;
+  --series-2: #d95926;
 }
 
 * { box-sizing: border-box; }
@@ -179,6 +182,70 @@ label.check {
   font-size: 12.5px;
   cursor: pointer;
 }
+
+/* ----------------------------------------------------------- custom pair */
+
+.custom-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 14px;
+}
+
+.custom-row[hidden] { display: none; }
+
+input.sym {
+  appearance: none;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-height: 32px;
+  width: 104px;
+  font: inherit;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+input.sym::placeholder { text-transform: none; letter-spacing: 0; color: var(--ink-muted); }
+input.sym:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+
+.custom-row .op { color: var(--ink-muted); font-size: 15px; }
+
+button.ghost.primary {
+  background: var(--ink);
+  color: var(--surface);
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+button.ghost.primary:hover { opacity: 0.85; background: var(--ink); }
+
+.recents {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+
+.recents button {
+  appearance: none;
+  background: transparent;
+  color: var(--ink-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.recents button:hover { background: var(--ghost); color: var(--ink); }
 
 /* ---------------------------------------------------------------- banners */
 
@@ -372,6 +439,183 @@ th, td {
 
 th { color: var(--ink-muted); font-weight: 550; }
 th:first-child, td:first-child { text-align: left; }
+
+/* ------------------------------------------------------------- screener */
+
+.screener {
+  margin-top: 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 16px 18px 18px;
+}
+
+.screener-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  margin-bottom: 14px;
+}
+
+.screener h2 {
+  font-size: 15px;
+  font-weight: 650;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.screener .controls { margin-bottom: 12px; }
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.progress[hidden] { display: none; }
+
+.progress .bar {
+  flex: 1 1 220px;
+  max-width: 380px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ghost);
+  overflow: hidden;
+}
+
+.progress .bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--series-1);
+  transition: width 0.25s ease;
+}
+
+.screener .summary {
+  font-size: 13px;
+  color: var(--ink-2);
+  margin: 4px 0 10px;
+}
+
+.screener .summary b { color: var(--ink); }
+.screener .summary .skipped { color: var(--ink-muted); }
+
+.hits {
+  width: 100%;
+  overflow-x: auto;
+}
+
+table.hit-table { width: 100%; min-width: 860px; }
+
+table.hit-table tbody tr { cursor: pointer; }
+table.hit-table tbody tr:hover { background: var(--ghost); }
+
+/* Benchmark colour: the row carries the slot, children read it off --bench. */
+.bench-SPY { --bench: var(--series-1); }
+.bench-QQQ { --bench: var(--series-2); }
+
+.ticker {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-weight: 650;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--bench) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bench) 55%, transparent);
+}
+
+.bench-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 0 0 8px;
+}
+
+.bench-key span { display: inline-flex; align-items: center; gap: 7px; }
+
+.bench-key i {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.ticker-list {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.7;
+}
+
+.ticker-list div { margin-top: 4px; }
+.ticker-list b { color: var(--ink); }
+
+.ticker-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--bench) 14%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* Text columns read left, numbers stay right-aligned. */
+table.hit-table th:nth-child(-n+4),
+table.hit-table td:nth-child(-n+4),
+table.hit-table th:nth-child(7),
+table.hit-table td:nth-child(7),
+table.hit-table th:nth-child(8),
+table.hit-table td:nth-child(8) { text-align: left; }
+
+table.hit-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+table.hit-table td:first-child { white-space: nowrap; }
+table.hit-table td.name { color: var(--ink-2); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+table.hit-table td.sector { color: var(--ink-muted); font-size: 12px; }
+
+.zcell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.zcell .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.zcell .glyph { font-size: 11px; color: var(--ink-2); font-weight: 700; }
+
+.earn-cell { white-space: nowrap; }
+
+.earn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.earn small { color: var(--ink-muted); font-size: 11px; }
+
+/* An announcement inside a week is the one that changes what you'd do. */
+.earn.soon { font-weight: 650; }
+.earn.soon small { color: var(--warning); font-weight: 600; }
+
+.hit-table .muted { color: var(--ink-muted); }
+
+.screener .empty {
+  color: var(--ink-muted);
+  font-size: 13px;
+  padding: 10px 0 2px;
+}
 
 footer.note {
   margin-top: 22px;

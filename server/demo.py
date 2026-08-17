@@ -31,11 +31,40 @@ def _noise(symbol: str, bucket: int) -> float:
     return (struct.unpack("<Q", digest)[0] / 2**63) - 1.0
 
 
+DRIFT_EPOCH = 1_750_000_000.0  # arbitrary fixed origin for the drift term
+
+# Anchor for the synthetic "recent dislocation", fixed for the life of the process so
+# every timeframe agrees. A steady drift cannot by itself push a z-score past 3 -- the
+# mean and sigma travel with it (a pure ramp caps around 1.7 sigma). Real 3-sigma
+# readings come from a sharp recent move against an otherwise stable ratio, so the demo
+# gives a minority of symbols exactly that.
+SHOCK_ANCHOR = datetime.now(timezone.utc).replace(
+    hour=0, minute=0, second=0, microsecond=0
+).timestamp()
+SHOCK_WINDOW_DAYS = 12.0
+SHOCK_CUTOFF = 0.88  # |noise| above this gets a shock -> about 12% of symbols
+SHOCK_SIZE = 0.28
+
+
+def _shock(symbol: str, epoch: float) -> float:
+    """Multiplier for a recent, symbol-specific dislocation (1.0 for most symbols)."""
+    amplitude = _noise(symbol, 5)
+    if abs(amplitude) <= SHOCK_CUTOFF:
+        return 1.0
+    age_days = (SHOCK_ANCHOR - epoch) / 86400
+    progress = max(0.0, min(1.0, (SHOCK_WINDOW_DAYS - age_days) / SHOCK_WINDOW_DAYS))
+    return 1 + SHOCK_SIZE * amplitude * progress
+
+
 def price_at(symbol: str, epoch: float) -> float:
     """Price as a pure function of time.
 
     Being time-based rather than a stepwise walk means every timeframe -- and the
     quote endpoint -- agree on the level, so ratios stay consistent everywhere.
+
+    The per-symbol drift matters for the screener: without it every synthetic name
+    oscillates inside the same band and no ratio can reach 3 sigma, so the tails the
+    screener exists to find would never appear offline.
     """
     base, amp = SEEDS.get(symbol, (100.0, 0.12))
     t = epoch
@@ -48,7 +77,12 @@ def price_at(symbol: str, epoch: float) -> float:
     hour = int(t // 3600)
     frac = (t % 3600) / 3600
     jitter = _noise(symbol, hour) * (1 - frac) + _noise(symbol, hour + 1) * frac
-    return base * (1 + amp * swing + 0.006 * jitter)
+
+    # Compounding per-symbol trend, +/-18%/yr, so single names disperse from the index.
+    years = (t - DRIFT_EPOCH) / (365.25 * 86400)
+    drift = (1 + 0.18 * _noise(symbol, 4)) ** years
+
+    return base * drift * _shock(symbol, t) * (1 + amp * swing + 0.006 * jitter)
 
 
 def _session_stamps(start: datetime, end: datetime, minutes: int | None) -> list[datetime]:

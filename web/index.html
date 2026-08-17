@@ -40,6 +40,17 @@
     <button class="ghost" id="refresh" type="button">Refresh</button>
   </div>
 
+  <form class="custom-row" id="custom-row" hidden>
+    <span class="sub">Ratio of</span>
+    <input type="text" id="custom-num" class="sym" placeholder="GLD" aria-label="Numerator symbol"
+           autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="24">
+    <span class="op">÷</span>
+    <input type="text" id="custom-den" class="sym" placeholder="SLV" aria-label="Denominator symbol"
+           autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="24">
+    <button class="ghost primary" id="custom-plot" type="submit">Plot</button>
+    <span class="recents" id="custom-recents"></span>
+  </form>
+
   <div class="banner error" id="error" hidden></div>
   <div class="banner" id="notice" hidden></div>
 
@@ -65,6 +76,44 @@
       <table id="bars-table"><caption>Last 25 bars</caption></table>
     </div>
   </details>
+
+  <section class="screener" id="screener">
+    <div class="screener-head">
+      <h2>Screener</h2>
+      <span class="sub" id="scr-sub">Scores every SPY and QQQ member against its own benchmark.</span>
+    </div>
+
+    <div class="controls">
+      <div class="seg" id="scr-tf-seg" role="group" aria-label="Screener timeframe"></div>
+      <label class="field">Mean/σ over
+        <select id="scr-stat">
+          <option value="full">full range</option>
+          <option value="500">last 500</option>
+          <option value="200">last 200</option>
+          <option value="100">last 100</option>
+        </select>
+      </label>
+      <label class="field">Flag |z| ≥
+        <input type="number" id="scr-threshold" value="3" step="0.25" min="0" max="10"
+               aria-label="Z-score threshold">
+      </label>
+      <label class="check"><input type="checkbox" id="scr-sp500" checked> S&amp;P 500</label>
+      <label class="check"><input type="checkbox" id="scr-ndx" checked> Nasdaq-100</label>
+      <label class="check"><input type="checkbox" id="scr-prefer" checked
+             title="Names in both indices are scored against QQQ; uncheck to use SPY">
+        Dual members vs QQQ</label>
+      <button class="ghost primary" id="scr-run" type="button">Run scan</button>
+      <button class="ghost" id="scr-cancel" type="button" hidden>Cancel</button>
+    </div>
+
+    <div class="progress" id="scr-progress" hidden>
+      <div class="bar"><span id="scr-bar"></span></div>
+      <span class="sub" id="scr-status"></span>
+    </div>
+
+    <div class="banner error" id="scr-error" hidden></div>
+    <div id="scr-results"></div>
+  </section>
 
   <footer class="note" id="foot"></footer>
 
