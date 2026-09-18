@@ -303,6 +303,16 @@ function zOf(value) {
   return st && st.std ? (value - st.mean) / st.std : null;
 }
 
+/* z of the LATEST point, out-of-sample (against the window minus the last point),
+   matching the server's stats.z and the stretch chip. */
+function zLatest() {
+  const st = state.series?.stats;
+  if (!st) return null;
+  const refMean = st.z_ref_mean ?? st.mean;
+  const refStd = st.z_ref_std ?? st.std;
+  return refStd ? (st.last - refMean) / refStd : null;
+}
+
 function onCrosshair(param) {
   const point = param?.time ? param.seriesData?.get(ratioLine) : null;
   if (!point) { renderReadoutLatest(); return; }
@@ -320,7 +330,9 @@ function renderReadoutLatest() {
   if (!s || !state.points.length) { box.innerHTML = ''; return; }
 
   const last = state.points[state.points.length - 1];
-  const z = zOf(last.value);
+  // The last point's z matches the stretch chip: out-of-sample against the
+  // reference window. (Crosshair z on historical points stays in-sample.)
+  const z = zLatest();
   box.innerHTML =
     `<b>${s.pair.label}</b> <span class="t">· ${s.timeframe.label}</span><br>` +
     `<b>${fmt(last.value)}</b>` +
@@ -500,7 +512,7 @@ async function loadSeries({ preserveView = false } = {}) {
 function describeError(message, kind) {
   if (kind === 'auth') {
     return `<b>Schwab authorization needed.</b> ${message}<br>` +
-           `Set your credentials in <code>.env</code>, run <code>python -m server.login</code>, then Refresh. ` +
+           `Start the hub (<code>../schwab_hub/run.sh</code>, and <code>run.sh login</code> weekly), then Refresh. ` +
            `To try the UI without credentials, start with <code>RVC_DEMO=1 python -m server</code>.`;
   }
   if (kind === 'upstream') {
@@ -577,9 +589,14 @@ async function pollQuote() {
     // Exchange time, to match the axis -- not whatever zone the browser is in.
     new Date(data.as_of).toLocaleTimeString('en-US', { timeZone: 'America/New_York' }) + ' ET';
 
-  if (state.series.stats.std) {
-    state.series.stats.last = data.ratio;
-    state.series.stats.z = (data.ratio - state.series.stats.mean) / state.series.stats.std;
+  // Keep the live z out-of-sample like the server: score against the reference
+  // stats (window minus the last point), not the full-window mean/σ.
+  const st = state.series.stats;
+  const refMean = st.z_ref_mean ?? st.mean;
+  const refStd = st.z_ref_std ?? st.std;
+  if (refStd) {
+    st.last = data.ratio;
+    st.z = (data.ratio - refMean) / refStd;
     renderTiles();
   }
   renderReadoutLatest();
@@ -1063,13 +1080,13 @@ async function main() {
 
   if (config.demo) {
     state.demoNotice = 'Demo mode (<code>RVC_DEMO=1</code>) — bars are synthetic, not market data. ' +
-      'Unset RVC_DEMO and run <code>python -m server.login</code> for live Schwab data.';
+      'Unset RVC_DEMO and start <code>../schwab_hub/run.sh</code> for live Schwab data.';
   }
 
   if (!config.auth.ready) {
     const why = config.auth.credentials_configured
-      ? 'No valid Schwab refresh token — they expire 7 days after each login.'
-      : 'SCHWAB_APP_KEY / SCHWAB_APP_SECRET are not set.';
+      ? 'The hub has no valid Schwab token — they expire 7 days after each login.'
+      : (config.auth.detail || 'schwab_hub is not reachable.');
     showError(describeError(why, 'auth'));
   }
 

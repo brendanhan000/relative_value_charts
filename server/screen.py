@@ -34,6 +34,11 @@ MAX_ATTEMPTS = 4
 # the burst trips the edge protection -- both must back off rather than give up.
 THROTTLE_STATUSES = (429, 403)
 
+# A z-score from a handful of overlapping bars is mostly noise (a recent IPO or a
+# thinly-printed name intersects to very few points). Rows below this floor are
+# excluded rather than ranked on an unreliable sigma.
+MIN_SCORE_BARS = 60
+
 
 class RateLimiter:
     """Paces requests across all workers, and slows itself down under pushback.
@@ -152,6 +157,10 @@ def _score(
 ) -> dict[str, Any] | None:
     ratio = build_ratio_series(symbol_closes, bench_closes, tf)
     if ratio.empty:
+        return None
+    if len(ratio) < MIN_SCORE_BARS:
+        # Too little overlap to trust sigma (recent IPO, thin name): a z from a
+        # handful of bars ranks noise next to 1,200-bar names.
         return None
     stats = compute_stats(ratio, window)
     if stats["mean"] is None or not stats["std"]:

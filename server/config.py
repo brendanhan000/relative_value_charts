@@ -22,10 +22,8 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    app_key: str = os.getenv("SCHWAB_APP_KEY", "")
-    app_secret: str = os.getenv("SCHWAB_APP_SECRET", "")
-    redirect_uri: str = os.getenv("SCHWAB_REDIRECT_URI", "https://127.0.0.1")
-    token_path: Path = ROOT / os.getenv("SCHWAB_TOKEN_PATH", "schwab_token.json")
+    # Schwab data comes from the central schwab_hub, which owns all credentials.
+    hub_url: str = os.getenv("SCHWAB_HUB_URL", "http://127.0.0.1:8765")
 
     host: str = os.getenv("HOST", "127.0.0.1")
     port: int = _int("PORT", 8182)
@@ -44,10 +42,6 @@ class Settings:
 
     # RVC_DEMO=1 serves synthetic bars so the UI runs without Schwab credentials.
     demo: bool = os.getenv("RVC_DEMO", "").lower() in {"1", "true", "yes"}
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.app_key and self.app_secret)
 
 
 SETTINGS = Settings()

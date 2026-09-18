@@ -176,12 +176,41 @@ def test_stats() -> None:
 
     windowed = compute_stats(values, 100)
     check("stat window truncates n", windowed["n"] == 100)
+    # z is OUT-OF-SAMPLE: the last point scored against the window minus itself.
+    ref = values.iloc[-100:-1]  # the 100-bar window, minus the scored point
+    want_z = (values.iloc[-1] - ref.mean()) / ref.std(ddof=1)
     check(
-        "z-score uses the latest close",
-        abs(windowed["z"] - (values.iloc[-1] - windowed["mean"]) / windowed["std"]) < 1e-12,
+        "z-score is out-of-sample (last point excluded from its own reference)",
+        abs(windowed["z"] - want_z) < 1e-12,
+        f"got {windowed['z']}, want {want_z}",
+    )
+    check(
+        "reference stats are exposed",
+        abs(windowed["z_ref_mean"] - ref.mean()) < 1e-12
+        and abs(windowed["z_ref_std"] - ref.std(ddof=1)) < 1e-12,
     )
 
     check("too-few-points is handled", compute_stats(values.head(1), None)["mean"] is None)
+
+
+def test_z_is_out_of_sample() -> None:
+    """A shock must not pull its own reference toward itself (the damping bug)."""
+    rng = np.random.default_rng(1)
+    n = 100
+    vals = pd.Series(rng.normal(10, 0.5, n), index=pd.date_range("2026-01-01", periods=n, freq="B", tz="UTC"))
+    vals.iloc[-1] = 13.0  # ~6-sigma shock vs the first 99
+
+    stats = compute_stats(vals, 100)
+    base = vals.iloc[:-1]
+    z_oos = (vals.iloc[-1] - base.mean()) / base.std(ddof=1)
+    z_in = (vals.iloc[-1] - vals.mean()) / vals.std(ddof=1)
+    check("out-of-sample z exceeds the damped in-sample z", stats["z"] > z_in,
+          f"oos={stats['z']:.2f} in={z_in:.2f}")
+    check("z matches the true out-of-sample value", abs(stats["z"] - z_oos) < 1e-9,
+          f"{stats['z']:.4f} vs {z_oos:.4f}")
+    # Mean/σ lines are unchanged: still the full window.
+    check("mean line still uses the full window", abs(stats["mean"] - vals.mean()) < 1e-12)
+    check("sigma line still uses the full window", abs(stats["std"] - vals.std(ddof=1)) < 1e-12)
 
 
 def test_mean_varies_by_timeframe() -> None:
@@ -459,56 +488,36 @@ def test_demo_daily_stamp_convention() -> None:
     )
 
 
-def test_auth_error_after_refresh_retry() -> None:
-    """A 401 that persists after the forced refresh is an auth error, not upstream."""
-    from server.schwab import SchwabAuthError, SchwabClient
+def test_hub_auth_and_availability_errors() -> None:
+    """Hub 401 / hub down are auth problems (UI shows guidance), other statuses are upstream."""
+    import httpx
 
-    class _Resp:
-        def __init__(self, status: int):
-            self.status_code = status
-            self.text = "unauthorized"
+    from server.schwab import SchwabAPIError, SchwabAuthError, SchwabClient
 
-            def json(self):
-                return {}
+    def client(handler):
+        c = SchwabClient("http://hub")
+        c._client = httpx.AsyncClient(base_url="http://hub", transport=httpx.MockTransport(handler))
+        return c
 
-    class _Client(SchwabClient):
-        def __init__(self):
-            # Bypass the real __init__ (no token file / httpx client needed).
-            # _lock is created lazily inside the coroutine: on Python 3.9,
-            # asyncio.Lock() outside a running loop raises RuntimeError.
-            class _T:
-                access_token = "tok"
-            self._tokens = _T()
+    async def outcome(handler):
+        try:
+            await client(handler)._get("/pricehistory", {})
+        except Exception as exc:  # noqa: BLE001
+            return type(exc)
+        return None
 
-        async def _access_token(self):
-            return "tok"
+    def hub_401(_req):
+        return httpx.Response(401, json={"error": "schwab_auth", "detail": "expired", "hint": "run login"})
 
-        async def _refresh(self):
-            return None
+    def down(_req):
+        raise httpx.ConnectError("refused")
 
-        @property
-        def tokens(self):
-            return self._tokens
+    def upstream_400(_req):
+        return httpx.Response(400, text="not entitled")
 
-    client = _Client()
-
-    class _Http:
-        async def get(self, *a, **k):
-            return _Resp(401)
-
-    client._client = _Http()
-
-    async def run():
-        client._lock = asyncio.Lock()
-        await client._get("/pricehistory", {})
-
-    try:
-        asyncio.run(run())
-        check("persistent 401 raises SchwabAuthError", False, "no exception raised")
-    except SchwabAuthError:
-        check("persistent 401 raises SchwabAuthError", True)
-    except Exception as exc:  # noqa: BLE001
-        check("persistent 401 raises SchwabAuthError", False, f"got {type(exc).__name__}")
+    check("hub 401 raises SchwabAuthError", asyncio.run(outcome(hub_401)) is SchwabAuthError)
+    check("hub down raises SchwabAuthError", asyncio.run(outcome(down)) is SchwabAuthError)
+    check("upstream 400 raises SchwabAPIError", asyncio.run(outcome(upstream_400)) is SchwabAPIError)
 
 
 if __name__ == "__main__":
@@ -518,6 +527,7 @@ if __name__ == "__main__":
     test_ratio_series()
     test_misaligned_legs_intersect()
     test_stats()
+    test_z_is_out_of_sample()
     test_mean_varies_by_timeframe()
     test_dst_boundary()
     test_fallback_symbol()
@@ -530,7 +540,7 @@ if __name__ == "__main__":
     test_decimals_for()
     test_custom_pair_series()
     test_demo_daily_stamp_convention()
-    test_auth_error_after_refresh_retry()
+    test_hub_auth_and_availability_errors()
 
     print()
     if FAILURES:

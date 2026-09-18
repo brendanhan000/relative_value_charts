@@ -164,9 +164,10 @@ def test_score_flags_three_sigma() -> None:
     rng = np.random.default_rng(7)
     n = 260
     bench = series(list(100 + rng.normal(0, 0.1, n)))
-    # Symbol tracks the benchmark, then gaps 25% higher on the final bar.
-    sym_vals = bench.to_numpy() * 2.0
-    sym_vals[-1] *= 1.25
+    # Symbol tracks the benchmark with genuine idiosyncratic noise (so the ratio
+    # has a non-zero reference sigma), then gaps 25% higher on the final bar.
+    sym_vals = bench.to_numpy() * 2.0 * (1.0 + rng.normal(0, 0.002, n))
+    sym_vals[-1] = bench.to_numpy()[-1] * 2.0 * 1.25
     symbol = series(list(sym_vals))
 
     row = _score(member, "SPY", symbol, bench, tf, None)
@@ -191,26 +192,46 @@ def test_score_ignores_flat_and_empty() -> None:
     tf = get_timeframe("1D")
     member = Member("TEST", "Test Co", "", ("sp500",))
 
-    flat = series([100.0] * 50)
+    # 100 points (above the bar floor) so the zero-sigma path is what fires.
+    flat = series([100.0] * 100)
     check("a constant ratio yields no row (sigma is zero)",
           _score(member, "SPY", flat, flat, tf, None) is None)
 
-    a = series([1.0] * 20, start="2026-01-02")
-    b = series([1.0] * 20, start="2026-06-01")
+    a = series([1.0] * 100, start="2026-01-02")
+    b = series([1.0] * 100, start="2026-06-01")
     check("non-overlapping legs yield no row", _score(member, "SPY", a, b, tf, None) is None)
 
 
 def test_score_matches_manual_z() -> None:
     tf = get_timeframe("1D")
     member = Member("TEST", "Test Co", "", ("sp500",))
-    bench = series([10.0] * 40)
-    values = [1.0] * 39 + [1.5]
+    bench = series([10.0] * 100)
+    values = [1.0] * 99 + [1.5]
     row = _score(member, "SPY", series([v * 10 for v in values]), bench, tf, None)
     ratios = pd.Series(values)
-    want = (ratios.iloc[-1] - ratios.mean()) / ratios.std(ddof=1)
-    check("z matches a hand-computed sample z", abs(row["z"] - want) < 1e-9,
+    # z is out-of-sample: the last point scored against the window minus itself.
+    ref = ratios.iloc[:-1]
+    want = (ratios.iloc[-1] - ref.mean()) / ref.std(ddof=1)
+    check("z matches a hand-computed out-of-sample z", abs(row["z"] - want) < 1e-9,
           f"{row['z']:.6f} vs {want:.6f}")
-    check("n counts every ratio point", row["n"] == 40, str(row["n"]))
+    check("n counts every ratio point", row["n"] == 100, str(row["n"]))
+
+
+def test_score_requires_minimum_overlap() -> None:
+    """A name with only a handful of overlapping bars must not be scored: sigma
+    from 10 points is noise, yet the row would rank by |z| next to 1,200-bar names."""
+    from server.screen import MIN_SCORE_BARS
+    tf = get_timeframe("1D")
+    member = Member("NEWCO", "Newco", "", ("sp500",))
+    short = series(list(np.linspace(1.0, 1.1, MIN_SCORE_BARS - 1)))
+    bench = series([100.0] * (MIN_SCORE_BARS - 1))
+    check("below the bar floor yields no row",
+          _score(member, "SPY", short, bench, tf, None) is None)
+    enough = series(list(np.linspace(1.0, 1.1, MIN_SCORE_BARS) +
+                                   np.random.default_rng(5).normal(0, 0.001, MIN_SCORE_BARS)))
+    bench2 = series(list(100.0 + np.random.default_rng(6).normal(0, 0.1, MIN_SCORE_BARS)))
+    check("at the bar floor a row is scored",
+          _score(member, "SPY", enough, bench2, tf, None) is not None)
 
 
 def test_stat_window_narrows_scoring() -> None:
@@ -440,6 +461,7 @@ if __name__ == "__main__":
     test_score_flags_three_sigma()
     test_score_ignores_flat_and_empty()
     test_score_matches_manual_z()
+    test_score_requires_minimum_overlap()
     test_stat_window_narrows_scoring()
     test_screener_matches_the_daily_chart()
     test_rate_limiter_paces()

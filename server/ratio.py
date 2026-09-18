@@ -275,7 +275,15 @@ def build_ratio_series(num: pd.Series, den: pd.Series, tf: Timeframe) -> pd.Seri
 
 
 def compute_stats(closes: pd.Series, window: int | None) -> dict[str, Any]:
-    """Mean and 1/2/3-sigma levels over the stats window (a flat horizontal band)."""
+    """Mean and 1/2/3-sigma levels over the stats window (a flat horizontal band).
+
+    The mean/σ lines describe "where the ratio usually sits" and are computed over
+    the full window INCLUDING the latest point. The z-score answers a different
+    question -- "how unusual is THIS print" -- so it is OUT-OF-SAMPLE: the last
+    point is scored against the mean/σ of the window EXCLUDING itself. Including
+    the scored point lets a shock pull the mean toward itself and inflate σ, which
+    damps z (measured: a true 7.1σ move reads 5.7σ in-sample at a 100-bar window).
+    """
     sample = closes if window is None else closes.tail(window)
     sample = sample.dropna()
     n = int(sample.size)
@@ -291,13 +299,26 @@ def compute_stats(closes: pd.Series, window: int | None) -> dict[str, Any]:
     for k in (1, 2, 3):
         bands.append({"k": k, "upper": mean + k * std, "lower": mean - k * std})
 
+    # Out-of-sample z: reference stats over the window minus the last point.
+    ref = sample.iloc[:-1]
+    z = None
+    ref_mean = ref_std = None
+    if ref.size >= 2:
+        ref_mean = float(ref.mean())
+        ref_std = float(ref.std(ddof=1))
+        if ref_std > 0:
+            z = (last - ref_mean) / ref_std
+
     return {
         "n": n,
         "mean": mean,
         "std": std,
         "bands": bands,
         "last": last,
-        "z": (last - mean) / std if std > 0 else None,
+        "z": z,
+        # The reference the z was computed against (window minus the last point).
+        "z_ref_mean": ref_mean,
+        "z_ref_std": ref_std,
         "min": float(sample.min()),
         "max": float(sample.max()),
         "start": sample.index[0].isoformat(),

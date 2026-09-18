@@ -114,10 +114,12 @@ class DemoClient:
     is_demo = True
 
     def __init__(self) -> None:
-        self.tokens = _DemoTokens()
 
     async def aclose(self) -> None:  # pragma: no cover - nothing to close
         return None
+
+    async def auth_status(self) -> dict[str, Any]:
+        return {"ready": True, "credentials_configured": True, "demo": True}
 
     async def price_history(
         self,
@@ -170,14 +172,3 @@ class DemoClient:
                 "quote": {"lastPrice": price, "bidPrice": price - 0.01, "askPrice": price + 0.01},
             }
         return out
-
-
-class _DemoTokens:
-    def status(self) -> dict[str, Any]:
-        return {
-            "has_token": True,
-            "access_valid": True,
-            "refresh_valid": True,
-            "refresh_expires_at": None,
-            "updated_at": None,
-        }

@@ -23,7 +23,7 @@ from .ratio import (
     live_ratio,
     resolve_pair,
 )
-from .schwab import SchwabAPIError, SchwabAuthError, authorization_url, get_client
+from .schwab import SchwabAPIError, SchwabAuthError, get_client
 from .screen import (
     ScreenParams,
     cancel_screen,
@@ -103,24 +103,13 @@ async def config() -> dict:
         "defaults": {"pair": DEFAULT_PAIR, "timeframe": DEFAULT_TIMEFRAME},
         "quote_poll_seconds": SETTINGS.quote_poll_seconds,
         "demo": SETTINGS.demo,
-        "auth": auth_status_payload(client),
+        "auth": await client.auth_status(),
     }
-
-
-def auth_status_payload(client) -> dict:
-    status = client.tokens.status()
-    status["credentials_configured"] = SETTINGS.configured or SETTINGS.demo
-    status["ready"] = SETTINGS.demo or (SETTINGS.configured and status["refresh_valid"])
-    status["demo"] = SETTINGS.demo
-    return status
 
 
 @app.get("/api/auth/status")
 async def auth_status() -> dict:
-    payload = auth_status_payload(get_client())
-    if SETTINGS.configured and not payload["ready"]:
-        payload["authorization_url"] = authorization_url()
-    return payload
+    return await get_client().auth_status()
 
 
 def _pair_or_400(pair: str, num: Optional[str], den: Optional[str]) -> Pair:

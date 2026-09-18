@@ -55,36 +55,17 @@ route parameter annotations at import time, so those must use `Optional[int]` ra
 than `int | None` — `from __future__ import annotations` does not save you there, and
 the failure is an import-time crash rather than a type error.
 
-### 2. Get Schwab API credentials
+### 2. Start the Schwab hub
 
-1. Sign in at [developer.schwab.com](https://developer.schwab.com) and create an app.
-2. Choose the **Market Data Production** product (that's all this project uses — no
-   trading scopes needed).
-3. Set the app's **Callback URL** to `https://127.0.0.1`.
-4. Wait for the app status to become **Ready For Use**, then copy the App Key and Secret.
+Schwab access is handled by the central **schwab_hub** (`../schwab_hub`), which owns
+the credentials and the weekly login. This project holds no Schwab secrets.
 
 ```bash
-cp .env.example .env
+../schwab_hub/run.sh login   # first time, then weekly (Schwab expires refresh tokens after 7 days)
+../schwab_hub/run.sh         # leave running
 ```
 
-Fill in `SCHWAB_APP_KEY` and `SCHWAB_APP_SECRET`. Keep `SCHWAB_REDIRECT_URI` exactly
-equal to the callback URL you registered.
-
-### 3. Log in
-
-```bash
-python -m server.login
-```
-
-This opens Schwab's consent page. After you approve, the browser tries to load
-`https://127.0.0.1...` and shows an error page — that's expected. Copy the **full URL
-from the address bar** and paste it back into the prompt. Tokens are written to
-`schwab_token.json` (gitignored, mode 0600).
-
-> Schwab expires refresh tokens after **7 days**, with no way to extend them. Re-run
-> `python -m server.login` weekly. Access tokens (30 min) refresh automatically.
-
-### 4. Run
+### 3. Run
 
 ```bash
 python -m server
@@ -159,6 +140,11 @@ Those numbers come from measurement, not the published limit. Against a live acc
 So the ceiling is real and it is not the documented 120/min. The defaults sit at half
 the proven-clean concurrency and a quarter of its request rate. Tune with
 `SCREEN_REQUESTS_PER_MINUTE` and `SCREEN_CONCURRENCY` knowing where the cliff is.
+
+Requests now go through the **schwab_hub**, which also caps concurrent upstream calls
+(`HUB_CONCURRENCY`, default 8, set in `../schwab_hub/.env`). `SCREEN_CONCURRENCY` above that cap
+just queues at the hub; raise both together, and keep them below the 24-worker cliff. The hub also
+caches history for 60s, so a rescan right after a scan is served from memory.
 
 **The scan backs off by itself.** A 429 or 403 halves the request rate, waits with
 exponential backoff and jitter, and retries up to four times per symbol before giving
@@ -270,8 +256,7 @@ color alone.
 ```
 server/
   api.py         FastAPI routes + static file serving
-  schwab.py      OAuth token store, refresh, market-data calls
-  login.py       one-time authorization flow (python -m server.login)
+  schwab.py      market-data client for the schwab_hub
   ratio.py       pair definitions, ratio construction, mean/σ stats
   timeframes.py  timeframe table, session-anchored resampling
   screen.py      screener job engine, rate limiting, z-scoring
@@ -299,7 +284,7 @@ tests/
 | `GET /api/config` | pairs, timeframes, defaults, auth status |
 | `GET /api/series` | ratio points + stats — `pair` **or** `num`+`den`, `timeframe`, `lookback_days`, `stat_window`, `extended` |
 | `GET /api/quote` | current ratio from live quotes — `pair` **or** `num`+`den` |
-| `GET /api/auth/status` | token state, and the authorization URL when re-login is needed |
+| `GET /api/auth/status` | whether the hub is up and its Schwab token is valid |
 | `GET /api/universe` | constituent counts, list age, and the estimated scan time |
 | `GET /api/earnings` | next earnings per symbol — `symbols=A,B,C`, optional `refresh=true` |
 | `POST /api/screen` | start a scan — `timeframe`, `stat_window`, `indices`, `prefer_qqq`, `lookback_days`, `limit` |
