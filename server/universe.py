@@ -215,4 +215,5 @@ def summary(universe: dict[str, Any] | None = None) -> dict[str, Any]:
         "fetched_at": data.get("fetched_at"),
         "counts": data.get("counts", {}),
         "total": len(data.get("members", [])),
+        "sectors": sorted({m["sector"] for m in data.get("members", []) if m.get("sector")}),
     }

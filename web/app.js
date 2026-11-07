@@ -761,6 +761,8 @@ async function loadUniverseInfo() {
     const info = await (await fetch('/api/universe')).json();
     if (info.total === undefined) throw new Error(info.detail || 'unavailable');
     screener.universe = info;
+    scrEl('scr-sector').innerHTML = '<option value="">all sectors</option>' +
+      (info.sectors || []).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
     const mins = Math.max(1, Math.round(info.estimated_seconds / 60));
     const when = info.fetched_at ? new Date(info.fetched_at).toLocaleDateString() : 'unknown';
     scrEl('scr-sub').innerHTML =
@@ -946,8 +948,16 @@ function renderHits() {
   const rows = screener.rows;
   if (!rows.length) { box.innerHTML = ''; return; }
 
+  const sectorSel = scrEl('scr-sector');
   const threshold = Math.abs(parseFloat(scrEl('scr-threshold').value) || 0);
-  const hits = rows.filter((r) => Math.abs(r.z) >= threshold);
+  const sortBy = {
+    abs: (a, b) => Math.abs(b.z) - Math.abs(a.z),
+    desc: (a, b) => b.z - a.z,
+    asc: (a, b) => a.z - b.z,
+  }[scrEl('scr-sort').value];
+  const hits = rows
+    .filter((r) => Math.abs(r.z) >= threshold && (!sectorSel.value || r.sector === sectorSel.value))
+    .sort(sortBy);
   const rich = hits.filter((r) => r.z > 0).length;
   const meta = screener.meta || {};
 
@@ -960,7 +970,7 @@ function renderHits() {
 
   const summary =
     `<p class="summary"><b>${hits.length}</b> of ${rows.length} scored beyond ` +
-    `<b>±${threshold}σ</b> — ${rich} rich, ${hits.length - rich} cheap. ` +
+    `<b>±${threshold}σ</b>${sectorSel.value ? ` in <b>${esc(sectorSel.value)}</b>` : ''} — ${rich} rich, ${hits.length - rich} cheap. ` +
     `${meta.timeframe_label || ''} bars, ${meta.lookback_days || '?'}-day lookback, ` +
     `mean/σ over ${meta.stat_window === 'full' ? 'the full range' : `the last ${meta.stat_window}`}. ` +
     `Click a row to chart it.${skippedNote}</p>`;
@@ -1051,6 +1061,8 @@ function initScreener() {
     await fetch(`/api/screen/${screener.job}`, { method: 'DELETE' });
   });
   scrEl('scr-threshold').addEventListener('input', renderHits);
+  scrEl('scr-sector').addEventListener('change', renderHits);
+  scrEl('scr-sort').addEventListener('change', renderHits);
   loadUniverseInfo();
 }
 

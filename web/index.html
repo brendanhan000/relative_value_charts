@@ -97,6 +97,16 @@
         <input type="number" id="scr-threshold" value="3" step="0.25" min="0" max="10"
                aria-label="Z-score threshold">
       </label>
+      <label class="field">Sector
+        <select id="scr-sector"><option value="">all sectors</option></select>
+      </label>
+      <label class="field">Sort by
+        <select id="scr-sort">
+          <option value="abs">|z| largest first</option>
+          <option value="desc">z high → low (rich first)</option>
+          <option value="asc">z low → high (cheap first)</option>
+        </select>
+      </label>
       <label class="check"><input type="checkbox" id="scr-sp500" checked> S&amp;P 500</label>
       <label class="check"><input type="checkbox" id="scr-ndx" checked> Nasdaq-100</label>
       <label class="check"><input type="checkbox" id="scr-prefer" checked

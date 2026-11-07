@@ -45,6 +45,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Relative Value Charts", lifespan=lifespan)
+# Revalidate the UI on every load so edits show up without a hard refresh.
+NO_CACHE = {"Cache-Control": "no-cache"}
 app.mount("/vendor", StaticFiles(directory=WEB_DIR / "vendor"), name="vendor")
 
 
@@ -62,17 +64,17 @@ async def _api_error(_request, exc: SchwabAPIError):
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers=NO_CACHE)
 
 
 @app.get("/app.js")
 async def app_js() -> FileResponse:
-    return FileResponse(WEB_DIR / "app.js", media_type="text/javascript")
+    return FileResponse(WEB_DIR / "app.js", media_type="text/javascript", headers=NO_CACHE)
 
 
 @app.get("/style.css")
 async def style_css() -> FileResponse:
-    return FileResponse(WEB_DIR / "style.css", media_type="text/css")
+    return FileResponse(WEB_DIR / "style.css", media_type="text/css", headers=NO_CACHE)
 
 
 @app.get("/api/config")
